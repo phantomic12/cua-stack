@@ -1,0 +1,137 @@
+#
+# docker-compose.yml for Hermes Agent
+#
+# Usage:
+#   HERMES_UID=$(id -u) HERMES_GID=$(id -g) docker compose up -d
+#
+# Set HERMES_UID / HERMES_GID to the host user that owns ~/.hermes so
+# files created inside the container stay readable/writable on the host.
+# The s6-overlay stage2 hook remaps the internal `hermes` user to these
+# values via usermod/groupmod; each supervised service then drops to that
+# user via `s6-setuidgid`.
+#
+# Security notes:
+#   - The dashboard service binds to 127.0.0.1 by default. It stores API
+#     keys; exposing it on LAN without auth is unsafe. If you want remote
+#     access, use an SSH tunnel or put it behind a reverse proxy that
+#     adds authentication — do NOT pass --insecure --host 0.0.0.0.
+#   - If you override entrypoint, keep `/init` as the first command in
+#     the chain (or let docker use the image's default ENTRYPOINT,
+#     which is `["/init", "/opt/hermes/docker/main-wrapper.sh"]`).
+#     `/init` is s6-overlay's PID 1 — it runs the cont-init.d scripts
+#     (chown, profile reconcile, dashboard toggle) and sets up the
+#     supervision tree before any service starts. Bypassing it skips
+#     all of that setup and the gateway will not work correctly.
+#   - The gateway's API server is off unless you uncomment API_SERVER_KEY
+#     and API_SERVER_HOST. See docs/user-guide/api-server.md before doing
+#     this on an internet-facing host.
+#   - The ``cua`` service is optional. It exposes a small HTTP API on
+#     http://localhost:7777 for spinning up Linux sandboxes (trycua/cua-xfce)
+#     driven by the cua Python SDK. It bind-mounts the host's docker socket
+#     so it can launch sandboxes locally without QEMU. Source lives at
+#     ./cua-stack/cua/ (the image is also published as phantomic12/cua-service).
+#     Note: the cua SDK's DockerRuntime hardcodes "localhost" in its
+#     RuntimeInfo; cua_host_fix.py monkey-patches it to use the docker0
+#     bridge gateway (172.17.0.1) where docker-proxy listens. This is the
+#     same iptables NAT quirk that affects any service binding a published
+#     port on this host.
+#
+services:
+  gateway:
+    build: .
+    image: hermes-agent
+    container_name: hermes
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ~/.hermes:/opt/data
+    environment:
+      - HERMES_UID=${HERMES_UID:-10000}
+      - HERMES_GID=${HERMES_GID:-10000}
+      # To expose the OpenAI-compatible API server beyond localhost,
+      # uncomment BOTH lines (API_SERVER_KEY is mandatory for auth):
+      # - API_SERVER_HOST=0.0.0.0
+      # - API_SERVER_KEY=${API_SERVER_KEY}
+      # Microsoft Teams — uncomment and fill in to enable Teams gateway.
+      # Register your bot at https://dev.botframework.com/ to get these values.
+      # - TEAMS_CLIENT_ID=${TEAMS_CLIENT_ID}
+      # - TEAMS_CLIENT_SECRET=${TEAMS_CLIENT_SECRET}
+      # - TEAMS_TENANT_ID=${TEAMS_TENANT_ID}
+      # - TEAMS_ALLOWED_USERS=${TEAMS_ALLOWED_USERS}
+      # - TEAMS_PORT=${TEAMS_PORT:-3978}
+      # Google Chat — uncomment and fill in to enable the Google Chat gateway.
+      # See website/docs/user-guide/messaging/google_chat.md for the full setup.
+      # The SA JSON path must point to a file mounted into the container —
+      # add a volume entry above (e.g. ``- ~/.hermes/google-chat-sa.json:/secrets/google-chat-sa.json:ro``)
+      # then set GOOGLE_CHAT_SERVICE_ACCOUNT_JSON to that mount path.
+      # - GOOGLE_CHAT_PROJECT_ID=${GOOGLE_CHAT_PROJECT_ID}
+      # - GOOGLE_CHAT_SUBSCRIPTION_NAME=${GOOGLE_CHAT_SUBSCRIPTION_NAME}
+      # - GOOGLE_CHAT_SERVICE_ACCOUNT_JSON=${GOOGLE_CHAT_SERVICE_ACCOUNT_JSON}
+      # - GOOGLE_CHAT_ALLOWED_USERS=${GOOGLE_CHAT_ALLOWED_USERS}
+    command: ["gateway", "run"]
+
+  dashboard:
+    image: hermes-agent
+    container_name: hermes-dashboard
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      - gateway
+    volumes:
+      - ~/.hermes:/opt/data
+    environment:
+      - HERMES_UID=${HERMES_UID:-10000}
+      - HERMES_GID=${HERMES_GID:-10000}
+    # Localhost-only. For remote access, tunnel via `ssh -L 9119:localhost:9119`.
+    command: ["dashboard", "--host", "127.0.0.1", "--no-open"]
+
+  cua:
+    # Computer-Use Agent (trycua/cua) — spawns Linux desktop sandboxes and
+    # exposes a small REST API for the rest of the Hermes stack to drive
+    # them. See cua-stack/cua/README.md for the full endpoint list and the
+    # cua_host_fix.py iptables workaround.
+    #
+    # The image is built from ./cua-stack/cua/Dockerfile on first `compose up`
+    # and cached as phantomic12/cua-service. Override with
+    # `image: phantomic12/cua-service:latest` to pull instead of build.
+    build: ./cua-stack/cua
+    image: phantomic12/cua-service:latest
+    container_name: hermes-cua
+    restart: unless-stopped
+    # Host network: the daemon needs to reach the docker0 bridge gateway
+    # (172.17.0.1) where docker-proxy listens for sandboxes it spawns, and
+    # other Hermes services on the host loopback reach it at
+    # http://localhost:7777. The cua_host_fix.py wrapper inside the
+    # container handles the host→docker0 routing.
+    network_mode: host
+    volumes:
+      # Host docker socket: lets the service launch trycua/cua-xfce sandboxes
+      # without QEMU. Required.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Persists ~/.cua/sandboxes/ so reconnecting to a sandbox survives
+      # a daemon restart.
+      - cua-state:/root/.cua
+      # Read-only access to the host's hermes data dir, so the daemon can
+      # pick up model creds (OpenAI / Anthropic API keys) for running
+      # cua-agent workflows. Not required for the basic REST API.
+      - ~/.hermes:/opt/hermes-data:ro
+    environment:
+      - HERMES_UID=${HERMES_UID:-10000}
+      - HERMES_GID=${HERMES_GID:-10000}
+      # Optional: an OpenAI / Anthropic key for the bundled cua-agent
+      # workflows. The basic /sandboxes /shell /screenshot endpoints don't
+      # need a key.
+      # - OPENAI_API_KEY=${OPENAI_API_KEY}
+      # - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      # CUA_DOCKER_HOST overrides the auto-detected docker0 bridge gateway.
+      # Uncomment only if the auto-detection picks the wrong IP.
+      # - CUA_DOCKER_HOST=172.17.0.1
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:7777/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  cua-state:
