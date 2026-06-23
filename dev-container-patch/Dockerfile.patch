@@ -1,0 +1,15 @@
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -193,6 +193,9 @@ RUN npm install -g playwright@latest puppeteer@latest && \
+ RUN pip3 install --break-system-packages \
+         pipx virtualenv poetry pipenv pdm
+ 
++# trycua/cua Python SDK (cua-sandbox + cua-core) for driving Linux desktop
++# sandboxes via the cua service in /opt/hermes/docker-compose.yml. The
++# service is exposed on hermes_hermes-net as http://cua:7777 — use httpx
++# or curl from this dev container to talk to it.
++RUN pip3 install --break-system-packages cua-sandbox cua-core
++
+ ###############################################################################
+ # Node global packages
+ ###############################################################################
