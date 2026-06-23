@@ -1,0 +1,6 @@
+# Runtime dependencies for the cua service.
+# Pinned to the versions known to work with cua 0.1.6 on Python 3.12.
+# `cua` is a meta-package that pulls in cua-agent, cua-cli, cua-sandbox, and
+# the helper modules (cua-computer, cua-core, cua-auto).
+cua>=0.1.6,<0.2
+aiohttp>=3.9,<4
